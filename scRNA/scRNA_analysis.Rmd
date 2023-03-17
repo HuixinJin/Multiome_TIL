@@ -1,0 +1,121 @@
+---
+title: "scRNA_analysis"
+author: "Huixin Jin"
+date: "2023-03-17"
+output: html_document
+---
+
+```{r,message=FALSE, warning=FALSE}
+library(Seurat)
+library(sctransform)
+library(DESeq2)
+library(patchwork)
+library(harmony)
+library(ggplot2)
+library(cowplot)
+library(SingleCellExperiment)
+library(tidyverse)
+
+set.seed(123)
+```
+
+## preprocess (filter, normalization)
+```{r, message=FALSE}
+# read in scRNA data and process
+## current work directory "/Users/jinhuixin/Master/thesis/BS1140"
+bs1140.rna <- Read10X('/Users/jinhuixin/Master/thesis/aligned_raw_data/BS1140/outs/filtered_feature_bc_matrix/')
+bs1140.rna <- bs1140.rna$`Gene Expression`
+geneTCRBCR <- function(Data = covidold1798.data){
+  TCRBCR.features <- c(grep('^TRAV', rownames(Data)),
+                       grep('^TRAJ', rownames(Data)),
+                       grep('^TRBV', rownames(Data)),
+                       grep('^TRBD', rownames(Data)),
+                       grep('^TRBJ', rownames(Data)))
+  return(TCRBCR.features)
+}
+features_to_delete <- geneTCRBCR(Data = bs1140.rna)
+bs1140.rna <- bs1140.rna[-features_to_delete,] # remove TCR genes
+
+# create seurat object
+bs1140.seurat <- CreateSeuratObject(counts = bs1140.rna, project = "bs1140", min.cells = 3, min.features = 200) # 5301-->5292
+
+# compute MT and HSP gene percentage in each cell
+bs1140.seurat[["percent.mt"]] <- PercentageFeatureSet(object = bs1140.seurat, pattern = "^MT-")
+bs1140.seurat[["percent.hsp"]] <- PercentageFeatureSet(object = bs1140.seurat, pattern = "^HSP")
+
+# Visualize QC metrics as a violin plot
+# nFeature_RNA: genes per cell; nCount_RNA: molecules detected per cell
+VlnPlot(bs1140.seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(object = bs1140.seurat, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(object = bs1140.seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+
+# Filter
+bs1140.seurat <- subset(x = bs1140.seurat, subset = nFeature_RNA > 150 & nFeature_RNA < 3000 & percent.mt < 10) 
+
+# Normalize each dataset via scTransform (fast and accurate, may want to run it on the cluster)
+# Regress out MT and HSP genes
+bs1140.seurat <- SCTransform(bs1140.seurat, vars.to.regress = c("percent.mt", "percent.hsp"), verbose = FALSE)
+
+# check with PCA
+bs1140.seurat <- RunPCA(bs1140.seurat, features = VariableFeatures(bs1140.seurat), assay = "SCT", npcs = 50)
+DimPlot(bs1140.seurat, reduction = 'pca')
+
+bs1140.seurat <- RunUMAP(object = bs1140.seurat, assay = "SCT", reduction = "pca", return.model = TRUE, dims = 1:50)
+bs1140.seurat <- FindNeighbors(object = bs1140.seurat, assay = "SCT", reduction = "pca", dims = 1:50)
+DimPlot(bs1140.seurat, reduction = "umap")
+bs1140.seurat <- FindClusters(object = bs1140.seurat, resolution = 1)
+```
+
+```{r}
+DefaultAssay(bs1140.seurat) <- 'SCT'
+
+#Check results of neighbourhood analysis & clustering:
+p <- DimPlot(bs1140.seurat, label = T)
+p
+```
+
+## cell type based on scRNA (SCT)
+```{r}
+# find markers
+markers <- FindAllMarkers(bs1140.seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+```
+
+SCT |Markers |Cell Type
+-----|-----|----- 
+0|ENTPD1|Ex-ENTPD1+
+1|GZMK|M-GZMK+
+2|IL7R|M-IL7R+
+3|CD69|M-CD69+
+4|GNLY, NKG7|GNLY+NKG7+
+5|SESN3|Naive-SESN3+
+6|CMSS1, FILIP1L|CMSS1+FILIP1L+
+7|IKZF2, PITPNC1|IKZF2+PITPNC1+
+8|HIST1H4C, STMN1|Prol-STMN1+TOP2A+
+9|GNLY, IKZF2|GNLY+IKZF2+
+
+```{r}
+# assign cell type on each cluster
+new.cluster.ids <- c('Ex-ENTPD1+', 'M-GZMK+', 'M-IL7R+', 'M-CD69+', 'GNLY+NKG7+', 'Naive-SESN3+', 'CMSS1+FILIP1L+', 'IKZF2+PITPNC1+', 'Prol-STMN1+TOP2A', 'GNLY+IKZF2+')
+names(new.cluster.ids) <- levels(bs1140.seurat)
+bs1140.seurat <- RenameIdents(bs1140.seurat, new.cluster.ids)
+
+# visualize umap with cell type annotation
+DimPlot(bs1140.seurat, reduction = 'umap', label = TRUE) + NoLegend()
+
+# visualize proleferate gene MKI67 expression level on umap
+FeaturePlot(bs1140.seurat, 'MKI67')
+```
+
+
+
+
+
+
+
