@@ -1,0 +1,232 @@
+---
+title: "multiomic_ArchR"
+author: "Huixin Jin"
+date: "2023-03-20"
+output: html_document
+---
+
+```{r}
+library(ArchR)
+
+addArchRThreads(6) # number of parallel threads
+```
+
+# import scRNA and scATAC data
+```{r, message=FALSE}
+# scRNA
+seRNA.bs1140 <- import10xFeatureMatrix(
+  input = c("/Users/jinhuixin/Master/thesis/aligned_raw_data/BS1140/outs/filtered_feature_bc_matrix.h5"),
+  names = c("BS1140")
+)
+seRNA.bs1140
+
+# import scATAC archr object
+proj.bs1140 <- readRDS("Save-for-scRNA/")
+
+# add scRNA data into archr object
+proj.bs1140 <- addGeneExpressionMatrix(input = proj.bs1140, seRNA = seRNA.bs1140, force = TRUE)
+saveArchRProject(ArchRProj = proj.bs1140, outputDirectory = "Save-add-GEM", load = FALSE)
+
+# filter cells
+proj.bs1140 <- proj.bs1140[proj.bs1140$TSSEnrichment > 6 & proj.bs1140$nFrags > 2500 & !is.na(proj.bs1140$Gex_nUMI)]
+
+# doublet filtering has been applied in scATAC analysis so skip it here
+```
+
+
+```{r, message=FALSE}
+# LSI-ATAC
+proj.bs1140 <- addIterativeLSI(
+  ArchRProj = proj.bs1140,
+  clusterParams = list(
+    resolution = 0.7,
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  saveIterations = FALSE,
+  useMatrix = "TileMatrix",
+  depthCol = "nFrags",
+  name = "LSI_ATAC",
+  force = TRUE
+)
+
+# LSI-RNA
+proj.bs1140 <- addIterativeLSI(
+  ArchRProj = proj.bs1140,
+  clusterParams = list(
+    resolution = 0.7,
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  saveIterations = FALSE,
+  useMatrix = "GeneExpressionMatrix",
+  depthCol = "Gex_nUMI",
+  varFeatures = 2500, # default is 2500 because ' nFeature for variable selection must be less than 1/2 the total features!'
+  firstSelection = "variable",
+  binarize = FALSE,
+  name = "LSI_RNA",
+  force = TRUE
+)
+```
+
+```{r, message=FALSE}
+# Combined Dims
+proj.bs1140 <- addCombinedDims(proj.bs1140, reducedDims = c("LSI_ATAC","LSI_RNA"), name = "LSI_Combined")
+# UMAP based on different level
+proj.bs1140 <- addUMAP(proj.bs1140, reducedDims = "LSI_ATAC", name = "UMAP_ATAC", minDist = 0.8, force = TRUE)
+proj.bs1140 <- addUMAP(proj.bs1140, reducedDims = "LSI_RNA", name = "UMAP_RNA", minDist = 0.8, force = TRUE)
+proj.bs1140 <- addUMAP(proj.bs1140, reducedDims = "LSI_Combined", name = "UMAP_Combined", minDist = 0.8, force = TRUE)
+```
+
+## Clustering (choose resolution based on Sihouette score)
+```{r, message=FALSE}
+chooseIntRes <- function(obj = obj, res = resolution){
+  obj <- addClusters(obj, reducedDims = "LSI_Combined", name = "Clusters", resolution = res, force = TRUE)
+  dist.matrix_ATAC <- dist(x = getReducedDims(obj, reducedDims = "LSI_ATAC"))
+  dist.matrix_RNA <- dist(x = getReducedDims(obj, reducedDims = "LSI_RNA"))
+  dist.matrix_Combined <- dist(x = getReducedDims(obj, reducedDims = "LSI_Combined"))
+  clusters <- obj$Clusters
+  
+  sil.atac <- silhouette(x = as.numeric(x = as.factor(x = clusters)), dist = dist.matrix_ATAC)
+  sil.rna <- silhouette(x = as.numeric(x = as.factor(x = clusters)), dist = dist.matrix_RNA)
+  sil.comb <- silhouette(x = as.numeric(x = as.factor(x = clusters)), dist = dist.matrix_Combined)
+  obj$sil.atac <- sil.atac[,3]
+  obj$sil.rna <- sil.rna[,3]
+  obj$sil.comb <- sil.comb[,3]
+  summary(sil.atac)
+  summary(sil.rna)
+  summary(sil.comb)
+  pdf(file = paste0(paste0("Multi-omics Silhouette plot "," Cluster resolution=",res), ".pdf"))
+  p1 <- plot(sil.atac, col = c(1:length(unique(sil.atac[,1]))), border = NA, main = "Silhouette plot of ATAC clusters")
+  p2 <- plot(sil.rna, col = c(1:length(unique(sil.rna[,1]))), border = NA, main = "Silhouette plot of RNA clusters")
+  p3 <- plot(sil.comb, col = c(1:length(unique(sil.rna[,1]))), border = NA, main = "Silhouette plot of Combined clusters")
+  print(p1 + p2 + p3)
+  dev.off()
+}
+
+resolutions <- seq(0.5, 1.5, 0.1)
+for (i in resolutions) {
+  chooseIntRes(obj = proj.bs1140, res = i)
+}
+# 0.5 and 0.6 gave the highest S score, and 0.6 gave more clusters (10)
+```
+
+## Cluster result
+```{r, message=FALSE}
+# res = 0.6
+proj.bs1140 <- addClusters(proj.bs1140, reducedDims = "LSI_Combined", name = "Clusters", resolution = 0.6, force = TRUE)
+p1 <- plotEmbedding(proj.bs1140, name = "Clusters", embedding = "UMAP_ATAC", size = 1.5, labelAsFactors = F, labelMeans = F) + theme(text = element_text(family = "Arial"))
+p2 <- plotEmbedding(proj.bs1140, name = "Clusters", embedding = "UMAP_RNA", size = 1.5, labelAsFactors = F, labelMeans = F) + theme(text = element_text(family = "Arial"))
+p3 <- plotEmbedding(proj.bs1140, name = "Clusters", embedding = "UMAP_Combined", size = 1.5, labelAsFactors = F, labelMeans = F) + theme(text = element_text(family = "Arial"))
+p1
+p2
+p3
+plotPDF(p1, p2, p3, name = "UMAP-scATAC-scRNA-Combined", addDOC = FALSE)
+```
+
+## Peak2Gene Linkage (ArchR Chapter15.3)
+```{r}
+proj.bs1140 <- readRDS("Save-add-GEM/Save-ArchR-Project.rds")
+
+proj.bs1140 <- addPeak2GeneLinks( # identify peak-to-gene links
+  ArchRProj = proj.bs1140,
+  reducedDims = "IterativeLSI",
+  useMatrix = "GeneExpressionMatrix"
+)
+p2g <- getPeak2GeneLinks(
+  ArchRProj = proj.bs1140,
+  corCutOff = 0.45,
+  resolution = 1,
+  returnLoops = TRUE
+)
+
+# plot peak to gene links
+markerGenes <- c(
+  "PDCD1", "CXCL13", "ENTPD1", "CTLA4", # exhausted T cells
+  "ICOS", "MKI67", # proliferate
+  "SELL", "CCR7", # naive T cells
+  "GZMK" # pre-dysfunctional T cell
+)
+## track plot
+p <- plotBrowserTrack(
+  ArchRProj = proj.bs1140,
+  groupBy = "Clusters",
+  geneSymbol = markerGenes,
+  upstream = 50000,
+  downstream = 50000,
+  loops = getPeak2GeneLinks(proj.bs1140)
+)
+plotPDF(plotList = p, 
+        name = "Plot-Tracks-Marker-Genes-with-Peak2GeneLinks.pdf", 
+        ArchRProj = proj.bs1140, 
+        addDOC = FALSE, width = 5, height = 5)
+## heatmap
+p <- plotPeak2GeneHeatmap(ArchRProj = proj.bs1140, groupBy = "Clusters")
+p
+```
+
+## Identification of Positive TF-regulators
+```{r}
+## Identify deviant TF motifs
+seGroupMotif <- getGroupSE(ArchRProj = proj.bs1140, useMatrix = "MotifMatrix", groupBy = "Clusters")
+seGroupMotif
+seZ <- seGroupMotif[rowData(seGroupMotif)$seqnames == "z",] # subset only the deviation z-scores form chromVAR
+rowData(seZ)$maxDelta <- lapply(seq_len(ncol(seZ)), function(x){
+  rowMaxs(assay(seZ) - assay(seZ)[,x])
+}) %>% Reduce("cbind", .) %>% rowMaxs
+
+## Identify correlated TF motifs and TF expression
+corGEM_MM <- correlateMatrices(
+  ArchRProj = proj.bs1140,
+  useMatrix1 = "GeneExpressionMatrix",
+  useMatrix2 = "MotifMatrix",
+  reducedDims = "IterativeLSI"
+)
+
+## Add maximum Delta deviation to the correlation data frame
+corGEM_MM$maxDelta <- rowData(seZ)[match(corGEM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+
+## Identify positive TF regulators
+corGEM_MM <- corGEM_MM[order(abs(corGEM_MM$cor), decreasing = TRUE),]
+corGEM_MM <- corGEM_MM[which(!duplicated(gsub("\\-.*","", corGEM_MM[,"MotifMatrix_name"]))),]
+corGEM_MM$TFRegulator <- "NO"
+corGEM_MM$TFRegulator[which((corGEM_MM$cor > 0.5 | corGEM_MM$cor < 0.5) & corGEM_MM$padj < 0.01 & corGEM_MM$maxDelta > quantile(corGSM_MM$maxDelta, 0.75))] <- "YES"
+sort(corGEM_MM[corGEM_MM$TFRegulator == "YES", 1])
+p <- ggplot(data.frame(corGEM_MM), aes(cor, maxDelta, color = TFRegulator, label = GeneExpressionMatrix_name)) +
+  geom_point() + 
+  theme_ArchR() +
+  geom_vline(xintercept = 0, lty = "dashed") + 
+  scale_color_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Expression") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(corGEM_MM$maxDelta)*1.05)
+  ) + theme(text = element_text(family = "Arial")) +
+  geom_text(aes(label = ifelse(TFRegulator == "YES", as.character(GeneExpressionMatrix_name), '')), hjust = -0.1, vjust = 1, size = 3)
+p
+```
+
+# Assign cell types on each cluster (atac clusters)
+```{r}
+remapClust <- c(
+  "C1" = "C1-Exhausted-1",
+  "C2" = "C2-Exhausted-2",
+  "C3" = "C3-Naive",
+  "C4" = "C4-EMRA",
+  "C5" = "C5-EM-1",
+  "C6" = "C6-EM-2",
+  "C7" = "C7",
+  "C8" = "C8-Memory-1",
+  "C9" = "C9-Memory-2"
+)
+proj.bs1140$Clusters2 <- mapLabels(proj.bs1140$Clusters, newLabels = remapClust, oldLabels = names(remapClust))
+saveArchRProject(ArchRProj = proj.bs1140, outputDirectory = "Save-for-traj", load = FALSE)
+```
+
+
+
+
+
+
+

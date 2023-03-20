@@ -1,0 +1,386 @@
+---
+title: "ArchR trajectory analysis"
+author: "Huixin Jin"
+date: "2023-03-20"
+output: html_document
+---
+
+```{r}
+library(ArchR)
+
+addArchRThreads(6) # number of parallel threads
+```
+
+```{r}
+# the integrated archr object
+proj.bs1140 <- readRDS("Save-for-traj/Save-ArchR-Project.rds")
+```
+
+# Import the reference UMAP
+another umap in our analysis from a multiple sample integrated dataset
+```{r}
+bs1140_multiome_wnnumap <-read.csv("multiomics/bs1140_multiome_wnnumap.csv")
+rownames(bs1140_multiome_wnnumap) <- bs1140_multiome_wnnumap$X
+bs1140_multiome_wnnumap <- bs1140_multiome_wnnumap[,-1]
+# Adjust rownames to match ArchR convention: 
+rownames(bs1140_multiome_wnnumap) <- str_extract(rownames(bs1140_multiome_wnnumap)
+, "[A-Z]+")
+rownames(bs1140_multiome_wnnumap) <- paste0("BS1140#", rownames(bs1140_multiome_wnnumap), "-1")
+# Check overlapping barcodes in Signac and ArchR dataset:
+archR_barcodes <- proj.bs1140$cellNames[proj.bs1140$cellNames %in% rownames(bs1140_multiome_wnnumap)]
+multi_barcodes <- bs1140_multiome_wnnumap[rownames(bs1140_multiome_wnnumap) %in% proj.bs1140$cellNames,]
+# Reorder Signac dataset:
+reorder_idx <- match(archR_barcodes,rownames(multi_barcodes)) 
+multi_barcodes <- multi_barcodes[reorder_idx,]
+multi_barcodes <- as.data.frame(multi_barcodes)
+# Add UMAP embedding to ArchR:
+df <- DataFrame(row.names=rownames(multi_barcodes), "custom#UMAP1" = multi_barcodes$wnnUMAP_1, "custom#UMAP2" =  multi_barcodes$wnnUMAP_2, check.names = FALSE)
+proj2.bs1140 <- subsetCells(ArchRProj = proj.bs1140, cellNames = archR_barcodes)
+proj2.bs1140@embeddings$customUMAP <- SimpleList(df = df, params = list())
+# Plot:
+plotEmbedding(proj2.bs1140, name = "Clusters", embedding = "customUMAP", size = 1.5, labelAsFactors=F, labelMeans=F) + theme(text = element_text(family = "Arial"))
+proj2.bs1140@embeddings$UMAP2 <- proj2.bs1140@embeddings$UMAP
+rownames(proj2.bs1140@embeddings$UMAP$df)
+head(rownames(proj2.bs1140@embeddings$UMAP$df))
+head(rownames(proj2.bs1140@embeddings$customUMAP$df))
+
+proj2.bs1140@embeddings$UMAP2$df <- proj2.bs1140@embeddings$UMAP2$df[c(1:2642),]
+
+type(proj2.bs1140@embeddings$UMAP2$df$`IterativeLSI#UMAP_Dimension_1`)
+type(df$`custom#UMAP1`)
+proj2.bs1140@embeddings$UMAP2$df$`IterativeLSI#UMAP_Dimension_1` <- df$`custom#UMAP1`
+proj2.bs1140@embeddings$UMAP2$df$`IterativeLSI#UMAP_Dimension_2` <- df$`custom#UMAP2`
+rownames(proj2.bs1140@embeddings$UMAP2$df) <- rownames(df)
+# UMAP2 is the final custom umap we use
+```
+
+```{r}
+p <- plotEmbedding(proj2.bs1140, colorBy = "cellColData", name = "Clusters2", embedding = "customUMAP") + 
+  theme(text = element_text(family = "Arial")) +
+  theme(legend.text = element_text(size = 10))
+p # display the annotated umap
+```
+
+# Trajectory - Exhausted T cell
+```{r}
+trajectory1 <- c("C3-Naive", "C8-Memory-1", "C9-Memory-2", "C2-Exhausted-2", "C1-Exhausted-1")
+
+proj2.bs1140 <- addTrajectory(
+  ArchRProj = proj2.bs1140,
+  name = "Ex_traj1",
+  groupBy = "Clusters2",
+  trajectory = trajectory1,
+  embedding = "UMAP2",
+  force = TRUE
+)
+
+# trajectory plot
+p <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "cellColData", name = "Ex_traj1", embedding = "UMAP2")
+p[[1]] + theme(text = element_text(family = "Arial"))
+plotPDF(p, name = "Multiom-Plot-Exhuasted-Traj1-UMAP.pdf", ArchRProj = proj2.bs1140, addDOC = FALSE, width = 5, height = 5)
+```
+
+## Trajectory of some genes
+```{r}
+# show some exhausted T cell marker genes along trajectory using predicted gene scores
+p1 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneScoreMatrix", name = "CXCL13", embedding = "UMAP2", continuousSet = "horizonExtra")
+p2 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneScoreMatrix", name = "PDCD1", embedding = "UMAP2", continuousSet = "horizonExtra")
+p3 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneScoreMatrix", name = "ENTPD1", embedding = "UMAP2", continuousSet = "horizonExtra")
+p4 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneScoreMatrix", name = "TCF7", embedding = "UMAP2", continuousSet = "horizonExtra")
+p5 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneScoreMatrix", name = "MKI67", embedding = "UMAP2", continuousSet = "horizonExtra")
+
+p1[[1]] <- p1[[1]] + theme(text = element_text(family = "Arial"))
+p2[[1]] <- p2[[1]] + theme(text = element_text(family = "Arial"))
+p3[[1]] <- p3[[1]] + theme(text = element_text(family = "Arial"))
+p4[[1]] <- p4[[1]] + theme(text = element_text(family = "Arial"))
+p5[[1]] <- p5[[1]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p1[[1]], p2[[1]], p3[[1]], p4[[1]], p5[[1]], ,
+             type = "h")
+
+p1[[2]] <- p1[[2]] + theme(text = element_text(family = "Arial"))
+p2[[2]] <- p2[[2]] + theme(text = element_text(family = "Arial")) 
+p3[[2]] <- p3[[2]] + theme(text = element_text(family = "Arial"))
+p4[[2]] <- p4[[2]] + theme(text = element_text(family = "Arial"))
+p5[[2]] <- p5[[2]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p1[[2]], p2[[2]], p3[[2]], p4[[2]],  p5[[2]], type = "h")
+```
+
+```{r}
+# show some exhausted T cell marker genes along trajectory using scRNA gene expression value
+p1 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneExpressionMatrix", name = "CXCL13", embedding = "UMAP2", continuousSet = "horizonExtra", imputeWeights = getImputeWeights(proj2.bs1140))
+p2 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneExpressionMatrix", name = "PDCD1", embedding = "UMAP2", continuousSet = "horizonExtra", imputeWeights = getImputeWeights(proj2.bs1140))
+p3 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneExpressionMatrix", name = "ENTPD1", embedding = "UMAP2", continuousSet = "horizonExtra", imputeWeights = getImputeWeights(proj2.bs1140))
+p4 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneExpressionMatrix", name = "TCF7", embedding = "UMAP2", continuousSet = "horizonExtra", imputeWeights = getImputeWeights(proj2.bs1140))
+p5 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "GeneExpressionMatrix", name = "MKI67", embedding = "UMAP2", continuousSet = "horizonExtra", imputeWeights = getImputeWeights(proj2.bs1140))
+
+p1[[1]] <- p1[[1]] + theme(text = element_text(family = "Arial"))
+p2[[1]] <- p2[[1]] + theme(text = element_text(family = "Arial"))
+p3[[1]] <- p3[[1]] + theme(text = element_text(family = "Arial"))
+p4[[1]] <- p4[[1]] + theme(text = element_text(family = "Arial"))
+p5[[1]] <- p5[[1]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p1[[1]], p2[[1]], p3[[1]], p4[[1]], p5[[1]], type = "h")
+
+p1[[2]] <- p1[[2]] + theme(text = element_text(family = "Arial"))
+p2[[2]] <- p2[[2]] + theme(text = element_text(family = "Arial")) 
+p3[[2]] <- p3[[2]] + theme(text = element_text(family = "Arial"))
+p4[[2]] <- p4[[2]] + theme(text = element_text(family = "Arial"))
+p5[[2]] <- p5[[2]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p1[[2]], p2[[2]], p3[[2]], p4[[2]],  p5[[2]], type = "h")
+```
+
+## Motif trajectory
+```{r}
+p6 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "MotifMatrix", name = "z:NFKB1_719", embedding = "UMAP2", continuousSet = "horizonExtra")
+p7 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "MotifMatrix", name = "z:MEF2A_639", embedding = "UMAP2", continuousSet = "horizonExtra")
+p8 <- plotTrajectory(proj2.bs1140, trajectory = "Ex_traj1", colorBy = "MotifMatrix", name = "z:JUND_124", embedding = "UMAP2", continuousSet = "horizonExtra")
+
+p6[[1]] <- p6[[1]] + theme(text = element_text(family = "Arial"))
+p7[[1]] <- p7[[1]] + theme(text = element_text(family = "Arial"))
+p8[[1]] <- p8[[1]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p6[[1]], p7[[1]], p8[[1]], type = "h")
+
+p6[[2]] <- p6[[2]] + theme(text = element_text(family = "Arial"))
+p7[[2]] <- p7[[2]] + theme(text = element_text(family = "Arial"))
+p8[[2]] <- p8[[2]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p6[[2]], p7[[2]], p8[[2]], type = "h")
+```
+
+
+# Trajectory of emra T cell
+```{r}
+trajectory2 <- c("C3-Naive", "C8-Memory-1", "C9-Memory-2", "C5-EM-1", "C6-EM-2", "C4-EMRA")
+
+proj2.bs1140 <- addTrajectory(
+  ArchRProj = proj2.bs1140,
+  name = "Emra_traj",
+  groupBy = "Clusters2",
+  trajectory = trajectory2,
+  embedding = "UMAP2",
+  force = TRUE
+)
+
+p <- plotTrajectory(proj2.bs1140, trajectory = "Emra_traj", colorBy = "cellColData", name = "Emra_traj", embedding = "UMAP2")
+p[[1]] + theme(text = element_text(family = "Arial"))
+plotPDF(p, name = "Multiom-Plot-EMRA-Traj-UMAP.pdf", ArchRProj = proj2.bs1140, addDOC = FALSE, width = 5, height = 5)
+```
+
+## Trajectory of some genes
+```{r}
+# show some emra T cell marker genes along trajectory using scRNA gene expression value
+p1 <- plotTrajectory(proj2.bs1140, trajectory = "Emra_traj", colorBy = "GeneExpressionMatrix", name = "IL7R", embedding = "UMAP2", continuousSet = "horizonExtra")
+p2 <- plotTrajectory(proj2.bs1140, trajectory = "Emra_traj", colorBy = "GeneExpressionMatrix", name = "CCR7", embedding = "UMAP2", continuousSet = "horizonExtra")
+
+p1[[1]] <- p1[[1]] + theme(text = element_text(family = "Arial"))
+p2[[1]] <- p2[[1]] + theme(text = element_text(family = "Arial"))
+
+ggAlignPlots(p1[[1]], p2[[1]], type = "h")
+
+p1[[2]] <- p1[[2]] + theme(text = element_text(family = "Arial"))
+p2[[2]] <- p2[[2]] + theme(text = element_text(family = "Arial")) 
+
+ggAlignPlots(p1[[2]], p2[[2]], type = "h")
+```
+
+# Pseudo-time heatmaps
+visualize changes in many features across pseudo-time using heatmaps
+
+## Tex
+```{r}
+## motif changes
+trajMM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Ex_traj1", useMatrix = "MotifMatrix", log2Norm = FALSE)
+p1 <- plotTrajectoryHeatmap(trajMM, pal = paletteContinuous(set = "solarExtra"))
+## Gene score changes
+trajGSM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Ex_traj1", useMatrix = "GeneScoreMatrix", log2Norm = TRUE)
+p2 <- trajectoryHeatmap(trajGSM, pal = paletteContinuous(set = "horizonExtra"))
+## Gene expression changes
+trajGEM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Ex_traj1", useMatrix = "GeneExpressionMatrix", log2Norm = FALSE)
+p3 <- plotTrajectoryHeatmap(trajGEM,  pal = paletteContinuous(set = "blueYellow"))
+## Peak changes
+trajPM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Ex_traj1", useMatrix = "PeakMatrix", log2Norm = TRUE)
+p4 <- plotTrajectoryHeatmap(trajPM, pal = paletteContinuous(set = "solarExtra"))
+plotPDF(p1,p2,p3,p4, name = "Multiom-Plot-Exhuasted-Traj-Heatmaps.pdf", ArchRProj = proj2.bs1140, addDOC = FALSE, width = 6, height = 8)
+```
+
+### Integrative pseudo-time analyses
+integrate gene scores / gene expression with motif accessibility across pseudo-time
+
+#### Gene score matrix
+```{r}
+corGSM_MM_traj <- correlateTrajectories(trajGSM, trajMM)
+corGSM_MM_traj[[1]]
+trajGSM2 <- trajGSM[corGSM_MM_traj[[1]]$name1,]
+trajMM2 <- trajMM[corGSM_MM_traj[[1]]$name2,]
+trajCombined <- trajGSM2
+assay(trajCombined, withDimnames = FALSE) <- t(apply(assay(trajGSM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale)) # not sure withDimnames
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+rowOrder <- match(rownames(combinedMat), rownames(trajGSM2))
+
+ht1 <- plotTrajectoryHeatmap(trajGSM2,  pal = paletteContinuous(set = "horizonExtra"),  varCutOff = 0, rowOrder = rowOrder)
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder)
+ht1 + ht2
+```
+
+#### Gene expression matrix
+```{r}
+corGEM_MM_traj <- correlateTrajectories(trajGEM, trajMM)
+corGEM_MM_traj[[1]]
+trajGEM2 <- trajGEM[corGEM_MM_traj[[1]]$name1,]
+trajMM2 <- trajMM[corGEM_MM_traj[[1]]$name2,]
+trajCombined <- trajGEM2
+assay(trajCombined, withDimnames = FALSE) <- t(apply(assay(trajGEM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale)) # not sure withDimnames
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+rowOrder <- match(rownames(combinedMat), rownames(trajGEM2))
+
+ht1 <- plotTrajectoryHeatmap(trajGEM2,  pal = paletteContinuous(set = "horizonExtra"),  varCutOff = 0, rowOrder = rowOrder) 
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder) 
+ht1 + ht2
+```
+
+
+## Temra
+```{r}
+## motif matrix
+trajMM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Emra_traj", useMatrix = "MotifMatrix", log2Norm = FALSE)
+p1 <- plotTrajectoryHeatmap(trajMM, pal = paletteContinuous(set = "solarExtra"))
+## Gene score matrix
+trajGSM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Emra_traj", useMatrix = "GeneScoreMatrix", log2Norm = TRUE)
+p2 <- trajectoryHeatmap(trajGSM, pal = paletteContinuous(set = "horizonExtra"))
+## Gene expression matrix
+trajGEM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Emra_traj", useMatrix = "GeneExpressionMatrix", log2Norm = FALSE)
+p3 <- plotTrajectoryHeatmap(trajGEM,  pal = paletteContinuous(set = "blueYellow"))
+## Peak matrix
+trajPM <- getTrajectory(ArchRProj = proj2.bs1140, name = "Emra_traj", useMatrix = "PeakMatrix", log2Norm = TRUE)
+p4 <- plotTrajectoryHeatmap(trajPM, pal = paletteContinuous(set = "solarExtra"))
+plotPDF(p1,p2,p3,p4, name = "Multiom-Plot-EMRA-Traj-Heatmaps.pdf", ArchRProj = proj2.bs1140, addDOC = FALSE, width = 6, height = 8)
+```
+
+### Integrative pseudo-time analyses
+#### Gene score matrix
+```{r}
+corGSM_MM_traj <- correlateTrajectories(trajGSM, trajMM)
+corGSM_MM_traj[[1]]
+trajGSM2 <- trajGSM[corGSM_MM_traj[[1]]$name1,]
+trajMM2 <- trajMM[corGSM_MM_traj[[1]]$name2,]
+trajCombined <- trajGSM2
+assay(trajCombined, withDimnames = FALSE) <- t(apply(assay(trajGSM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale)) # not sure withDimnames
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+rowOrder <- match(rownames(combinedMat), rownames(trajGSM2))
+
+ht1 <- plotTrajectoryHeatmap(trajGSM2,  pal = paletteContinuous(set = "horizonExtra"),  varCutOff = 0, rowOrder = rowOrder)
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder)
+ht1 + ht2
+```
+
+#### Gene expression matrix
+```{r}
+## with Gene expression matrix
+corGEM_MM_traj <- correlateTrajectories(trajGEM, trajMM)
+corGEM_MM_traj[[1]]
+trajGEM2 <- trajGEM[corGEM_MM_traj[[1]]$name1,]
+trajMM2 <- trajMM[corGEM_MM_traj[[1]]$name2,]
+trajCombined <- trajGEM2
+assay(trajCombined, withDimnames = FALSE) <- t(apply(assay(trajGEM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale)) # not sure withDimnames
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+rowOrder <- match(rownames(combinedMat), rownames(trajGEM2))
+
+ht1 <- plotTrajectoryHeatmap(trajGEM2,  pal = paletteContinuous(set = "horizonExtra"),  varCutOff = 0, rowOrder = rowOrder) 
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "solarExtra"), varCutOff = 0, rowOrder = rowOrder) 
+ht1 + ht2
+```
+
+# Clone subgroup cells
+cells in our sample were from different clones. here we focused on each clone subgroup to investigate the differentiation trajectory in some clones.
+```{r}
+# import clone info
+clone <- read.csv("multiomics/bs1140_multiome_large_clones.csv")
+clone$barcode <- paste0("BS1140#", clone$clean_barcode, "-1")
+clone_CASSPGLAVVEQFF <- clone$barcode[clone$cdr3 == "CASSPGLAVVEQFF"]
+sub_proj.bs1140 <- subsetCells(proj2.bs1140, cellNames = clone_CASSPGLAVVEQFF)
+clone_CASSSSSYEQYF <- clone$barcode[clone$cdr3 == "CASSSSSYEQYF"]
+clone_CASSFSLPASGANVLTF <- clone$barcode[clone$cdr3 == "CASSFSLPASGANVLTF"]
+clone_CASSLDNYGYTF <- clone$barcode[clone$cdr3 == "CASSLDNYGYTF"]
+
+proj2.bs1140$Ex_traj2 <- proj2.bs1140$Ex_traj1
+proj2.bs1140$Emra_traj
+
+rownames(proj2.bs1140@cellColData) %in% clone$barcode # check cell name match or not
+proj2.bs1140$Emra_traj[rownames(proj2.bs1140@cellColData) %in% clone_CASSPGLAVVEQFF]
+table(is.na(proj2.bs1140$Emra_traj))
+
+# plot sub-umap for sub-clone
+plotEmbedding(ArchRProj = sub_proj.bs1140,
+              embedding = "UMAP2",
+              colorBy = "cellColData",
+              name = "Ex_traj2")
+
+# subset of archr object
+df <- data.frame("clone_CASSPGLAVVEQFF" = rownames(proj2.bs1140@cellColData), row.names = rownames(proj2.bs1140@cellColData))
+df$clone_CASSPGLAVVEQFF[rownames(df) %ni% clone_CASSPGLAVVEQFF] <- "No"
+proj2.bs1140@cellColData$clone_CASSPGLAVVEQFF <- df
+proj2.bs1140@cellColData$barcode <- rownames(proj2.bs1140@cellColData)
+
+proj2.bs1140 <- addTrajectory(ArchRProj = proj2.bs1140, 
+                              name = "Temra_clone_CASSPGLAVVEQFF",
+                              groupBy = "clone_CASSPGLAVVEQFF",
+                              trajectory = barcode,
+                              embedding = "UMAP2",
+                              force = TRUE)
+
+plotTrajectory(sub_proj.bs1140, trajectory = "Ex_traj1", colorBy = "cellColData", name = "Ex_traj1", embedding = "UMAP2")+ theme(text = element_text(family = "Arial"))
+plotEmbedding(ArchRProj = proj2.bs1140, embedding = "UMAP2", highlightCells = clone_CASSPGLAVVEQFF)+ theme(text = element_text(family = "Arial"))
+```
+
+```{r}
+clone_list <- unique(clone$cdr3)
+
+MM <- getMatrixFromProject(proj2.bs1140, useMatrix = "MotifMatrix")
+
+# function to draw plots for motif NFKB1_719, MEF2A_639, JUND_124
+cloneMotifPseudotime <- function(clone_name, traj){
+  clone_barcode <- clone$barcode[clone$cdr3 == clone_name]
+  pseudo_time <- proj2.bs1140@cellColData@listData[[traj]][rownames(proj2.bs1140@cellColData) %in% clone_barcode]
+  MM_clone <- MM[,rownames(proj2.bs1140@cellColData) %in% clone_barcode]
+  # NFKB1_719
+  NFKB1 <- MM_clone["NFKB1_719",]
+  NFKB1_df <- data.frame("Pseudo_time" = pseudo_time, "NFKB1_719" = NFKB1@assays@data@listData[["z"]]@x, row.names = rownames(proj2.bs1140@cellColData)[rownames(proj2.bs1140@cellColData) %in% clone_barcode])
+  p1 <- ggplot(data = NFKB1_df, aes(x = Pseudo_time, y = NFKB1_719)) +
+    geom_point()+
+    geom_smooth()+
+    ggtitle(paste0("Clone ", clone_name))+
+    theme_bw()+
+    theme(plot.title = element_text(size = 15))
+  
+  # MEF2A_639
+  MEF2A <- MM_clone["MEF2A_639",]
+  MEF2A_df <- data.frame("Pseudo_time" = pseudo_time, "MEF2A_639" = MEF2A@assays@data@listData[["z"]]@x, row.names = rownames(proj2.bs1140@cellColData)[rownames(proj2.bs1140@cellColData) %in% clone_barcode])
+  p2 <- ggplot(data = MEF2A_df, aes(x = Pseudo_time, y = MEF2A_639)) +
+    geom_point()+
+    geom_smooth()+
+    ggtitle(paste0("Clone ", clone_name))+
+    theme_bw()+
+    theme(plot.title = element_text(size = 15))
+  
+  # JUND_124
+  JUND <- MM_clone["JUND_124",]
+  JUND_df <- data.frame("Pseudo_time" = pseudo_time, "JUND_124" = JUND@assays@data@listData[["z"]]@x, row.names = rownames(proj2.bs1140@cellColData)[rownames(proj2.bs1140@cellColData) %in% clone_barcode])
+  p3 <- ggplot(data = JUND_df, aes(x = Pseudo_time, y = JUND_124)) +
+    geom_point()+
+    geom_smooth()+
+    ggtitle(paste0("Clone ", clone_name))+
+    theme_bw()+
+    theme(plot.title = element_text(size = 15))
+  pdf(paste0("BS1140_ArchR/Plots/Multiom-", clone_name, "-", traj, "-motif-pseudotime.pdf"), width = 12, height = 5)
+  print(p1 + p2 + p3)
+  dev.off()
+}
+
+for (i in clone_list) {
+  cloneMotifPseudotime(clone_name = i, traj = "Ex_traj1")
+}
+```
