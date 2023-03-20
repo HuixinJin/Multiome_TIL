@@ -1,0 +1,173 @@
+---
+title: "Pando GRN"
+author: "Huixin Jin"
+date: "2023-03-20"
+output: html_document
+---
+
+```{r}
+library(Pando)
+library(Seurat)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(EnsDb.Hsapiens.v86)
+library(Signac)
+library(stringr)
+library(ArchRtoSignac)
+library(ArchR)
+library(tidyr)
+library(ggraph)
+library(doParallel)
+library(tidygraph)
+```
+
+```{r}
+# set parallel treads
+registerDoParallel(7)
+```
+
+# Seurat object of sample
+```{r}
+multiom <- readRDS('../../multi-omics/multiome_chromvar_test_WNN.rds')
+bs1140.multiom <- subset(x = multiom, subset = orig.ident == "BS1140")
+```
+
+# Build GRN
+## Initiating the GRN
+```{r}
+data('phastConsElements20Mammals.UCSC.hg38') # reference genome
+bs1140.pando <- initiate_grn(bs1140.multiom,
+                             rna_assay = 'RNA',
+                             peak_assay = 'peaks',
+                             regions = union(phastConsElements20Mammals.UCSC.hg38, SCREEN.ccRE.UCSC.hg38)) # preselect some regions
+bs1140.pando
+```
+
+## Finding TF binding sites
+```{r}
+bs1140.pando <- find_motifs(bs1140.pando,
+                            pfm = motifs,
+                            motif_tfs = motif2tf,
+                            genome = BSgenome.Hsapiens.UCSC.hg38)
+
+regions <- NetworkRegions(bs1140.pando) # sparse peak*motif matrix with the matches and some other info
+regions@motifs@data[1:5,1:5]
+```
+
+## Inferring the GRN
+```{r}
+bs1140.pando <- infer_grn(bs1140.pando,
+                          genes = VariableFeatures(bs1140.pando, assay="SCT"),
+                          peak_to_gene_method = 'GREAT',
+                          method = 'glm',
+                          parallel = T)
+
+coef(bs1140.pando)
+GetNetwork(bs1140.pando)
+```
+
+## Module extraction
+```{r}
+bs1140.pando <- find_modules(bs1140.pando,
+                             p_thresh = 0.1,
+                             nvar_thresh = 2,
+                             min_genes_per_module = 1,
+                             rsq_thresh = 0.05)
+
+modules <- NetworkModules(bs1140.pando)
+modules@meta
+
+# plot the goodness-of-fit metrics
+plot_gof(bs1140.pando, point_size = 3)
+
+# plot module size
+plot_module_metrics(bs1140.pando)
+```
+
+## Visualizing the GRN
+```{r}
+bs1140.pando <- get_network_graph(bs1140.pando)
+p <- plot_network_graph(bs1140.pando, layout = 'umap', label_nodes = FALSE)
+pdf('./bs1140_all_variable_features_grn_umap_wo_labels.pdf', width = 10, height = 7)
+p 
+dev.off()
+```
+
+
+# sub-GRN based on top50 eRegulons for each cluster in SCENIC+
+each eRegulon including the TF and targeted genes. we used these information to subset GRN for certain eR-based clusters from the whole GRN network
+
+## define a function to generate subplot with tidygraph and ggraph
+```{r}
+tf_graph <- NetworkGraph(bs1140.pando) # extract the network
+tf_graph
+
+subGRN <- function(celltype = celltype, tflist = tflist, genelist = genelist, graph = tf_graph,
+                   edge_width = 0.2, edge_color = c('-1'='darkgrey', '1'='#55BAA5'), node_color = pals::magma(100)){
+  gene_tf_list <- c(genelist, tflist) # input target gene & TF list
+  tmp_tf_graph <- graph %>%
+    activate(edges) %>%
+    mutate(from_and_to_nodes_in_celltype = ((.E()$from_node %in% gene_tf_list)& (.E()$to_node %in% gene_tf_list))) %>%
+    activate(nodes) %>%
+    mutate(in_celltype = (.N()$name %in% gene_tf_list)) %>%
+    mutate(label_gene = (.N()$name %in% interested_TF_list)) # subset the network
+  p <- ggraph(tmp_tf_graph, x = UMAP_1, y=UMAP_2) + 
+    geom_edge_diagonal(aes(filter=from_and_to_nodes_in_celltype, color=factor(dir)), width = edge_width)+
+    scale_edge_color_manual(values=edge_color) +
+    geom_node_point(aes(filter=in_celltype, fill = centrality, size=centrality), color='darkgrey', shape=21) + 
+    scale_fill_gradientn(colors = node_color) +
+    geom_node_text(aes(filter=(label_gene & in_celltype), label=name), repel=T, size=8/ggplot2::.pt, max.overlaps=99999) + 
+    theme_void()
+  ggsave(paste0('sub_eRegulon_grn_r&g_',celltype,'.pdf'), plot = p, height = 8.27, width = 12)
+}
+```
+
+## sub-GRN for each eR cluster
+```{r}
+# 0-ZSCAN22+EOMES+
+tfs_0 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_0-ZSCAN22+EOMES+.csv', row.names = 1)
+genes_0 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_0-ZSCAN22+EOMES+.csv', row.names = 1)
+# 1-SP1+MAFF+
+tfs_1 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_1-SP1+MAFF+.csv', row.names = 1)
+genes_1 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_1-SP1+MAFF+.csv', row.names = 1)
+# 2-FOXP1+ARID5B+
+tfs_2 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_2-FOXP1+ARID5B+.csv', row.names = 1)
+genes_2 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_2-FOXP1+ARID5B+.csv', row.names = 1)
+# 3-ETS1+ZNF282+
+tfs_3 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_3-ETS1+ZNF282+.csv', row.names = 1)
+genes_3 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_3-ETS1+ZNF282+.csv', row.names = 1)
+# 4-ZNF442+ZNF526+
+tfs_4 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_4-ZNF442+ZNF526+.csv', row.names = 1)
+genes_4 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_4-ZNF442+ZNF526+.csv', row.names = 1)
+# 5-TBX21+RARG+
+tfs_5 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_5-TBX21+RARG+.csv', row.names = 1)
+genes_5 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_5-TBX21+RARG+.csv', row.names = 1)
+# 6-CREM-ELF1+
+tfs_6 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_6-CREM-ELF1+.csv', row.names = 1)
+genes_6 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_6-CREM-ELF1+.csv', row.names = 1)
+# 7-ZNF385D+RORC+
+tfs_7 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_7-ZNF385D+RORC+.csv', row.names = 1)
+genes_7 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_7-ZNF385D+RORC+.csv', row.names = 1)
+# 8-CREM-BACH2-
+tfs_8 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_8-CREM-BACH2-.csv', row.names = 1)
+genes_8 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_8-CREM-BACH2-.csv', row.names = 1)
+# 9-EGR1+FOSB+
+tfs_9 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_TF_r&g_9-EGR1+FOSB+.csv', row.names = 1)
+genes_9 <- read.csv('../BS140_Pando/eR_celltype_grn_nodes_gene_r&g_9-EGR1+FOSB+.csv', row.names = 1)
+
+subGRN(celltype = "0-ZSCAN22+EOMES+", tflist = tfs_0$X0, genelist = genes_0$X0)
+subGRN(celltype = "1-SP1+MAFF+", tflist = tfs_1$X0, genelist = genes_1$X0)
+subGRN(celltype = "2-FOXP1+ARID5B+", tflist = tfs_2$X0, genelist = genes_2$X0)
+subGRN(celltype = "3-ETS1+ZNF282+", tflist = tfs_3$X0, genelist = genes_3$X0)
+subGRN(celltype = "4-ZNF442+ZNF526+", tflist = tfs_4$X0, genelist = genes_4$X0)
+subGRN(celltype = "5-TBX21+RARG+", tflist = tfs_5$X0, genelist = genes_5$X0)
+subGRN(celltype = "6-CREM-ELF1+", tflist = tfs_6$X0, genelist = genes_6$X0)
+subGRN(celltype = "7-ZNF385D+RORC+", tflist = tfs_7$X0, genelist = genes_7$X0)
+subGRN(celltype = "8-CREM-BACH2-", tflist = tfs_8$X0, genelist = genes_8$X0)
+subGRN(celltype = "9-EGR1+FOSB+", tflist = tfs_9$X0, genelist = genes_9$X0)
+```
+
+
+
+
+
+
