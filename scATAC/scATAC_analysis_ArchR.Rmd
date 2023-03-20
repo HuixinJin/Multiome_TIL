@@ -296,6 +296,12 @@ plotPDF(plotList = p,
     addDOC = FALSE, width = 5, height = 5)
 ```
 
+```{r}
+# save the archr object for later multiomic analysis
+saveArchRProject(proj.bs1140, outputDirectory = "Save-for-scRNA", load = FALSE)
+```
+
+
 ## Identifying Marker Peaks with ArchR
 ```{r}
 # making pseudo-bulk replicates (required by later calling peaks)
