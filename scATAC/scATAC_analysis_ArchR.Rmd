@@ -1,0 +1,487 @@
+---
+title: "scATAC_archR"
+author: "Huixin Jin"
+date: "2023-03-17"
+output: html_document
+---
+
+```{r,message=FALSE, warning=FALSE}
+library(ArchR)
+set.seed(1)
+```
+
+## Preprocess
+
+```{r, message=FALSE}
+addArchRThreads(threads = 6) # set threads for parallel process
+
+addArchRGenome("hg38") # reference genome
+
+af.bs1140 <- createArrowFiles(inputFiles = '/Users/jinhuixin/Master/thesis/aligned_raw_data/BS1140/outs/atac_fragments.tsv.gz',
+                             sampleNames = 'BS1140',
+                             filterTSS = 4,
+                             addTileMat = TRUE,
+                             addGeneScoreMat = TRUE)
+af.bs1140
+```
+
+```{r}
+# find doublet
+doubScores <- addDoubletScores(
+  input = af.bs1140,
+  k = 10,
+  knnMethod = "UMAP",
+  LSIMethod = 1
+)
+proj.bs1140 <- ArchRProject(
+  ArrowFiles = af.bs1140,
+  outputDirectory = "BS1140_ArchR",
+  copyArrows = T
+)
+proj.bs1140
+```
+
+```{r}
+# plot log10(nFrag) vs TSS enrichment score
+df <- getCellColData(proj.bs1140, select = c("log10(nFrags)", "TSSEnrichment"))
+p <- ggPoint(
+  x = df[,1],
+  y = df[,2],
+  colorDensity = TRUE,
+  continuousSet = "sambaNight",
+  xlabel = "Log10 Unique Fragments",
+  ylabel = "TSS Enrichment",
+  xlim = c(log10(500), quantile(df[,1], probs = 0.99)),
+  ylim = c(0, quantile(df[,2], probs = 0.99))
+) +
+  geom_hline(yintercept = 4, lty = "dashed") + 
+  geom_vline(xintercept = 3, lty = "dashed") +
+  theme(text = element_text(family = "Arial"))
+p
+
+# fragment size distribution
+plotFragmentSizes(ArchRProj = proj.bs1140) + theme(text = element_text(family = "Arial"))
+
+# TSS enrichment profiles
+plotTSSEnrichment(ArchRProj = proj.bs1140) + theme(text = element_text(family = "Arial"))
+```
+
+```{r}
+# filter doublets
+proj.bs1140 <- filterDoublets(proj.bs1140)
+```
+
+## Choose parameter for LSI using Silhouette Score
+```{r, message=FALSE}
+# define a function for Silhouette Score evaluation
+chooseLSI <- function(obj, iterations = 2, resolution = 0.2, varFeatures = 25000){
+  obj <- addIterativeLSI(
+    ArchRProj = obj,
+    useMatrix = "TileMatrix",
+    name = "IterativeLSI",
+    iterations = iterations,
+    clusterParams = list(
+      resolution = resolution,
+      sampleCells = 10000,
+      n.start = 10
+    ),
+    varFeatures = varFeatures,
+    dimsToUse = 1:30,
+    force = TRUE
+  )
+  obj <- addClusters(
+    input = obj,
+    reducedDims = "IterativeLSI",
+    method = "Seurat",
+    name = "Clusters",
+    resolution = 0.8,
+    force = TRUE
+  )
+  dist.matrix <- dist(x = getReducedDims(obj))
+  clusters <- obj$Clusters
+  sil <- silhouette(x = as.numeric(x = as.factor(x = clusters)), dist = dist.matrix)
+  print(summary(sil))
+  obj$sil <- sil[,3]
+  pdf(file = paste0("Silhouette plot iterations=",iterations," resolution=",resolution," varFeatures=",varFeatures, ".pdf"), width = 8, height = 8)
+  p <- plot(sil, col = c(1:length(unique(sil[,1]))), border = NA, main = paste0("Silhouette plot iterations=",iterations," resolution=",resolution," varFeatures=",varFeatures))
+  p
+  dev.off()
+}
+
+iters <- c(2,3,4) # range of iteration numbers to test
+for (i in iters) {
+  chooseLSI(obj = proj.bs1140, iterations = i)
+}
+# iteration = 3 performs better
+```
+
+```{r, message=FALSE}
+res <- seq(0.5,1.5,0.1) # resolutions for LSI step to test
+for (i in res) {
+  chooseLSI(obj = proj.bs1140, iterations = 3, resolution = i)
+}
+
+# res=0.7 is ok
+```
+
+## Choose resolution for addClusters 
+```{r, message=FALSE}
+# use optimal parameters for interativeLSI
+proj.bs1140 <- addIterativeLSI(
+  ArchRProj = proj.bs1140,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 3,
+  clusterParams = list(
+    resolution = c(0.7),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30,
+  force = TRUE
+)
+
+# define function to choose cluster resolution based on silhouette score
+chooseClusterRes <- function(obj = obj, resolution = resolution){
+  obj <- addClusters(
+    input = obj,
+    reducedDims = "IterativeLSI",
+    method = "Seurat",
+    name = "Clusters",
+    resolution = resolution,
+    force = TRUE
+    )
+    table(obj$Clusters)
+    dist.matrix <- dist(x = getReducedDims(obj))
+    clusters <- obj$Clusters
+    sil <- silhouette(x = as.numeric(x = as.factor(x = clusters)), dist = dist.matrix)
+    print(summary(sil))
+    obj$sil <- sil[,3]
+    pdf(file = paste0(paste0("Silhouette plot "," Cluster resolution=",resolution), ".pdf"), width = 8, height = 6)
+    p <- plot(sil, col = c(1:length(unique(sil[,1]))), border = NA, main = paste0("Silhouette plot ", "Cluster resolution=",resolution))
+    p
+    dev.off()
+}
+
+res <- seq(0.1,1.5,0.1) # resolutions to test
+for (i in res) {
+  chooseClusterRes(obj = proj.bs1140, resolution = i)
+}
+# 0.8 is good enough, lower resolution gave higher Silhouette score, but less clusters
+# finally use 0.9
+```
+
+
+## Clustering
+```{r, message=FALSE}
+proj.bs1140 <- addClusters(
+  input = proj.bs1140,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.9,
+  force = TRUE
+)
+table(proj.bs1140$Clusters)
+
+proj.bs1140 <- addUMAP(
+  ArchRProj = proj.bs1140,
+  reducedDims = "IterativeLSI",
+  name = "UMAP",
+  nNeighbors = 30,
+  minDist = 0.5,
+  metric = "cosine",
+  force = TRUE
+)
+
+p1 <- plotEmbedding(ArchRProj = proj.bs1140, colorBy = "cellColData", name = "Clusters", embedding = "UMAP") + theme(text = element_text(family = "Arial"))
+p1
+plotPDF(p1, name = "Plot-UMAP-Sample-Clusters.pdf", ArchRProj = proj.bs1140,addDOC = FALSE, width = 5, height = 5)
+```
+
+## Expression of some marker genes
+```{r}
+# marker genes
+markersGS <- getMarkerFeatures(
+  ArchRProj = proj.bs1140,
+  useMatrix = "GeneScoreMatrix",
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+markerGenes <- c(
+  "PDCD1", "CXCL13", "ENTPD1", "CTLA4", # exhausted T cells
+  "ICOS", "MKI67", # proliferate
+  "SELL", "CCR7", # naive T cells
+  "GZMK", # pre-dysfunctional T cell
+  "IL7R" # Memory (also CCR7)
+  )
+
+# use heatmap to visualize the expression of some marker genes
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS,
+  cutOff = "FDR <= 0.01 & Log2FC >= 0.25",
+  labelMarkers = markerGenes,
+  transpose = TRUE
+)
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+
+# save plot
+plotPDF(heatmapGS, name = "GeneScores-Marker-Heatmap", width = 8, height = 6, ArchRProj = proj.bs1140, addDOC = FALSE)
+```
+
+## Expression on UMAP after imputation (with MAGIC)
+```{r}
+# impute gene scores by smoothing signal across nearby cells
+proj.bs1140 <- addImputeWeights(proj.bs1140)
+
+p <- plotEmbedding(ArchRProj = proj.bs1140,
+                   colorBy = "GeneScoreMatrix",
+                   name = markerGenes,
+                   embedding = "UMAP",
+                   imputeWeights = getImputeWeights(proj.bs1140))
+p_all <- lapply(p, function(x){
+  x + guides(color = FALSE, fill = FALSE) +
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )+
+    theme(text = element_text(family = "Arial"))
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3), p_all))
+plotPDF(plotList = p, 
+    name = "Plot-UMAP-Marker-Genes-W-Imputation.pdf", 
+    ArchRProj = proj.bs1140, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+## Check some marker gene score on UMAP to annotate cell type for each cluster
+```{r}
+em <- c("GZMK", "CXCR4", "CXCR3", "CD44")
+naive <- c("LEF1", "SELL", "TCF7")
+cm <- c("CCR7", "IL7R", "CD27", "CD28", "GZMA", "CCL5", "GPR183")
+emra <- c("KLRG1", "CX3CR1", "FCGR3A", "FGFBP2", "PRF1", "GZMH", "TBX21", "EOMES", "S1PR1", "S1PR5")
+rm <- c("CD6", "XCL1", "XCL2", "MYADM", "CAPG", "RORA")
+iel <- c("CD160", "KIR2DL4", "TMIGD2", "KLRC1", "KLRC2", "KLRC3", "NR4A1", "NR4A2", "NR4A3", "IKZF2", "ENTPD1", "CD69")
+ex <- c("HAVCR2", "CXCL13", "PDCD1", "LAYN", "TOX", "IFNG", "GZMB", "MIR155HG", "TNFRSF9", "ITGAE")
+mait <- c("SLC4A10", "KLRB1", "ZBTB16", "NCR3", "RORC")
+
+p <- plotEmbedding(ArchRProj = proj.bs1140,
+                   colorBy = "GeneScoreMatrix",
+                   name = mait,
+                   embedding = "UMAP",
+                   imputeWeights = getImputeWeights(proj.bs1140))
+p_all <- lapply(p, function(x){
+  x + guides(color = "none", fill = "none") +
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+      axis.text.x=element_blank(), 
+      axis.ticks.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      axis.ticks.y=element_blank()
+    )+
+    theme(text = element_text(family = "Arial"))
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3), p_all))
+plotPDF(plotList = p, 
+    name = "Plot-UMAP-mait-Marker-Genes-W-Imputation.pdf", 
+    ArchRProj = proj.bs1140, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+## Identifying Marker Peaks with ArchR
+```{r}
+# making pseudo-bulk replicates (required by later calling peaks)
+proj.bs1140 <- addGroupCoverages(ArchRProj = proj.bs1140, groupBy = "Clusters") # half hour
+
+# Calling Peaks with Macs2
+proj.bs1140 <- addReproduciblePeakSet(
+  ArchRProj = proj.bs1140,
+  groupBy = "Clusters",
+  pathToMacs2 = "/Users/jinhuixin/miniconda3/bin/MACS2"
+)
+
+proj.bs1140 <- addPeakMatrix(proj.bs1140) # add peak matrix into object
+getAvailableMatrices(proj.bs1140) # check available meatrix in object
+
+# identify marker peaks
+markersPeaks <- getMarkerFeatures(
+  ArchRProj = proj.bs1140,
+  useMatrix = "PeakMatrix",
+  groupBy = "Clusters",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.01 & Log2FC >= 1", returnGR = TRUE)
+
+# Plot marker peaks
+heatmapPeaks <- markerHeatmap(
+  seMarker = markersPeaks,
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.5",
+  transpose = TRUE,
+  nLabel = 10
+)
+draw(heatmapPeaks, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+plotPDF(heatmapPeaks, name = "Peak-Marker-Heatmap", width = 14, height = 6, ArchRProj = proj.bs1140, addDOC = FALSE)
+```
+
+## Motif Enrichment
+```{r}
+# create a binary matrix where the presence of a motif in each peak is indicted numerically
+proj.bs1140 <- addMotifAnnotations(ArchRProj = proj.bs1140, motifSet = "cisbp", name = "Motif")
+
+# motif enrichment on our marker peaks
+enrichMotifs <- peakAnnoEnrichment(
+  seMarker = markersPeaks,
+  ArchRProj = proj.bs1140,
+  peakAnnotation = "Motif",
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
+)
+
+# enriched motifs in each cluster
+heatmapEM <- plotEnrichHeatmap(enrichMotifs, n = 7, transpose = TRUE)
+ComplexHeatmap::draw(heatmapEM, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+plotPDF(heatmapEM, name = "Motifs-Enriched-Marker-Heatmap", width = 8, height = 6, ArchRProj = proj.bs1140, addDOC = FALSE)
+```
+
+## ChromVAR deviations enrichment
+predicting enrichment of TF activity on a per-cell basis
+```{r}
+if ("Motif" %ni% names(proj.bs1140@peakAnnotation)){
+  proj.bs1140 <- addMotifAnnotations(ArchRProj = proj.bs1140, motifSet = "cisbp", name = "Motif")
+}
+
+# add a set of background peaks used in computing deviations
+proj.bs1140 <- addBgdPeaks(proj.bs1140)
+
+# compute per-cell deviations (accessibility changes in binding sites for known cell type-specific TFs)
+proj.bs1140 <- addDeviationsMatrix(
+  ArchRProj = proj.bs1140,
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+options(ggrepel.max.overlaps = Inf)
+plotVarDev <- getVarDeviations(proj.bs1140, name = "MotifMatrix", plot = TRUE) + theme(text = element_text(family = "Arial"))
+plotVarDev
+plotPDF(plotVarDev, name = "Variable-Motif-Deviation-Scores", width = 7, height = 7, ArchRProj = proj.bs1140, addDOC = FALSE)
+```
+
+```{r}
+# extract motifs we are interested in
+motifs <- c(
+  "TCF7", "BCL6", # Generation and maintenance
+  "EOMES", "MYB", "TBX21", # TBET, TBOX family|maintenance
+  "ID2", "ID3", # terminal differentiation
+  "NR4A", # 1/2/3 Generation
+  "RUNX1"
+  )
+# edit the format of motif name manually
+markerMotifs <- getFeatures(proj.bs1140, select = paste(motifs, collapse = "|"), useMatrix = "MotifMatrix")
+markerMotifs
+markerMotifs <- grep("z:", markerMotifs, value = TRUE)
+markerMotifs <- markerMotifs[markerMotifs %ni% c("z:MYBL1_653", "z:MYBL2_647", "z:BCL6B_218", "z:ARID2_11", "z:ARID3C_10", "z:ARID3B_8", "z:ARID3A_6", "z:TCF7L1_763", "z:TCF7L2_762")]
+markerMotifs
+markerMotifs <- c("z:TCF7_750", "z:BCL6_187", 
+                  "z:EOMES_788", "z:MYB_648", "z:TBX21_780", 
+                  "z:ID2_35", "z:ID3_38", 
+                  "z:NR4A1_671", "z:NR4A2_686", "z:NR4A3_668",
+                  "z:RUNX1_733")
+
+p <- plotGroups(
+  ArchRProj = proj.bs1140,
+  groupBy = "Clusters",
+  colorBy = "MotifMatrix",
+  name = markerMotifs,
+  imputeWeights = getImputeWeights(proj.bs1140)
+)
+
+p2 <- lapply(seq_along(p), function(x){
+  if(x != 1){
+    p[[x]] + guides(color = "none", fill = "none") +
+      theme_ArchR(baseSize = 10) +
+      theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+      theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        text = element_text(family = "Arial")
+      ) + ylab("")
+  }else{
+    p[[x]] + guides(color = "none", fill = "none") +
+      theme_ArchR(baseSize = 10) +
+      theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+      theme(
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        text = element_text(family = "Arial")
+      ) + ylab("")
+  }
+})
+do.call(cowplot::plot_grid, c(list(nrow = 1, rel_widths = c(2, rep(1, length(p2) - 1))), p2))
+plotPDF(p, name = "Plot-Groups-Deviations-w-Imputation", width = 5, height = 5, ArchRProj = proj.bs1140, addDOC = FALSE)
+
+# plot on umap
+p <- plotEmbedding(
+  ArchRProj = proj.bs1140,
+  colorBy = "MotifMatrix",
+  name = markerMotifs,
+  embedding = "UMAP",
+  imputeWeights = getImputeWeights(proj.bs1140)
+)
+p2 <- lapply(p, function(x){
+    x + guides(color = "none", fill = "none") + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        text = element_text(family = "Arial")
+    ) +
+    theme(plot.title = element_text(size = 12))
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+plotPDF(p, name = "Plot-Groups-Deviations-w-Imputation-UMAP", width = 5, height = 5, ArchRProj = proj.bs1140, addDOC = FALSE)
+```
+
+## Co-accessibility with ArchR 
+```{r}
+proj.bs1140 <- addCoAccessibility(
+  ArchRProj = proj.bs1140,
+  reducedDims = "IterativeLSI"
+)
+p <- plotBrowserTrack(
+  ArchRProj = proj.bs1140,
+  groupBy = "Clusters",
+  geneSymbol = markerGenes,
+  upstream = 50000,
+  downstream = 50000,
+  loops = getCoAccessibility(proj.bs1140),
+) 
+plotPDF(plotList = p, 
+    name = "Plot-Tracks-Marker-Genes-with-CoAccessibility.pdf", 
+    ArchRProj = proj.bs1140, 
+    addDOC = FALSE, width = 5, height = 5)
+
+coALoops <- getCoAccessibility(proj.bs1140, returnLoops = FALSE)
+coALoops
+
+write.csv(coALoops, "coaccessibility_untuned.txt")
+write.csv(getPeakSet(proj.bs1140), "peaks_all.txt")
+
+saveArchRProject(ArchRProj = proj.bs1140, outputDirectory = "Save_after_archR", load = FALSE)
+```
+
+
+
+
+
