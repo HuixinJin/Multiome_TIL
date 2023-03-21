@@ -1,0 +1,305 @@
+---
+title: "Mapquery_scRNA_eR"
+author: "Huixin Jin"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r}
+library(Seurat)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(ggplot2)
+library(cowplot)
+library(reticulate)
+library(SingleCellExperiment)
+library(tidyverse)
+library(RColorBrewer)
+library(scCustomize)
+library(ggrepel)
+library(aplot)
+
+set.seed(123)
+```
+
+# scRNA process
+## preprocess (filter, normalization, regress out)
+```{r, message=FALSE}
+# read in scRNA data and process
+## current work directory "/Users/jinhuixin/Master/thesis/BS1140"
+bs1140.rna <- Read10X('/Users/jinhuixin/Master/thesis/aligned_raw_data/BS1140/outs/filtered_feature_bc_matrix/')
+bs1140.rna <- bs1140.rna$`Gene Expression`
+geneTCRBCR <- function(Data = covidold1798.data){
+  TCRBCR.features <- c(grep('^TRAV', rownames(Data)),
+                       grep('^TRAJ', rownames(Data)),
+                       grep('^TRBV', rownames(Data)),
+                       grep('^TRBD', rownames(Data)),
+                       grep('^TRBJ', rownames(Data)))
+  return(TCRBCR.features)
+}
+features_to_delete <- geneTCRBCR(Data = bs1140.rna)
+bs1140.rna <- bs1140.rna[-features_to_delete,] 
+```
+
+```{r}
+bs1140.seurat <- CreateSeuratObject(counts = bs1140.rna, project = "bs1140", min.cells = 3, min.features = 200) # 5301-->5292
+table(bs1140.seurat$orig.ident)
+
+bs1140.seurat[["percent.mt"]] <- PercentageFeatureSet(object = bs1140.seurat, pattern = "^MT-")
+bs1140.seurat[["percent.hsp"]] <- PercentageFeatureSet(object = bs1140.seurat, pattern = "^HSP")
+
+VlnPlot(bs1140.seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1 <- FeatureScatter(object = bs1140.seurat, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(object = bs1140.seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+```
+
+```{r}
+#nFeature_RNA: genes per cell; nCount_RNA: molecules detected per cell
+bs1140.seurat <- subset(x = bs1140.seurat, subset = nFeature_RNA > 150 & nFeature_RNA < 3000 & percent.mt < 10) 
+
+#Normalize each dataset via scTransform (fast and accurate, may want to run it on the cluster)
+#Regress out MT and HSP genes
+bs1140.seurat <- SCTransform(bs1140.seurat, vars.to.regress = c("percent.mt", "percent.hsp"), verbose = FALSE)
+
+bs1140.seurat <- RunPCA(bs1140.seurat, features = VariableFeatures(bs1140.seurat), assay = "SCT", npcs = 50)
+DimPlot(bs1140.seurat, reduction = 'pca')
+bs1140.seurat <- RunUMAP(object = bs1140.seurat, assay = "SCT", reduction = "pca", return.model = TRUE, dims = 1:50)
+bs1140.seurat <- FindNeighbors(object = bs1140.seurat, assay = "SCT", reduction = "pca", dims = 1:50)
+bs1140.seurat <- FindClusters(object = bs1140.seurat, resolution = 1)
+```
+
+```{r}
+DefaultAssay(bs1140.seurat) <- 'SCT'
+# find markers
+markers <- FindAllMarkers(bs1140.seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+```
+
+SCT |Markers |Cell Type
+-----|-----|----- 
+0|ENTPD1|Ex-ENTPD1+
+1|GZMK|M-GZMK+
+2|IL7R|M-IL7R+
+3|CD69|M-CD69+
+4|GNLY, NKG7|GNLY+NKG7+
+5|SESN3|Naive-SESN3+
+6|CMSS1, FILIP1L|CMSS1+FILIP1L+
+7|IKZF2, PITPNC1|IKZF2+PITPNC1+
+8|HIST1H4C, STMN1|Proliferate-STMN1+TOP2A
+9|GNLY, IKZF2|GNLY+IKZF2+
+
+```{r}
+# assign cell type on each cluster
+new.cluster.ids <- c('Ex-ENTPD1+', 'M-GZMK+', 'M-IL7R+', 'M-CD69+', 'GNLY+NKG7+', 'Naive-SESN3+', 'CMSS1+FILIP1L+', 'IKZF2+PITPNC1+', 'Prol-STMN1+TOP2A+', 'GNLY+IKZF2+')
+names(new.cluster.ids) <- levels(bs1140.seurat)
+bs1140.seurat <- RenameIdents(bs1140.seurat, new.cluster.ids)
+bs1140.seurat<- AddMetaData(bs1140.seurat, Idents(bs1140.seurat), col.name = "celltype_rna_sct_assay")
+DimPlot(bs1140.seurat, reduction = 'umap', label = TRUE) + NoLegend()
+```
+
+# eR adata
+```{r}
+# set environment
+use_condaenv('env_x86')
+```
+
+```{r}
+cell_order <- colnames(bs1140.seurat)
+cell_order <- paste0(cell_order, '-BS1140')
+```
+
+
+```{python}
+import scanpy as sc
+# eR
+adata = sc.read_h5ad('/Users/jinhuixin/Master/thesis/GRN/BS1140/eRegulon_cluster/eR_cluster_anndata.h5ad')
+adata = adata[r.cell_order,]
+```
+
+
+## Create a Seurat object
+```{r}
+# Get the expression matrix
+exprs <- t(py$adata$X)
+colnames(exprs) <- py$adata$obs_names$to_list()
+rownames(exprs) <- py$adata$var_names$to_list()
+# Create the Seurat object
+eR.seurat <- CreateSeuratObject(exprs)
+# Set the expression assay
+eR.seurat <- SetAssayData(eR.seurat, "data", exprs)
+# Add observation metadata
+eR.seurat <- AddMetaData(eR.seurat, py$adata$obs)
+# Add feature metadata
+#eR.seurat[["RNA"]][["n_cells"]] <- py$adata$var["n_cells"] 
+# Add embedding
+embedding <- py$adata$obsm["X_umap"] # umap based on eR
+rownames(embedding) <- py$adata$obs_names$to_list()
+colnames(embedding) <- c("umap_1","umap_2")
+eR.seurat[["umap"]] <- CreateDimReducObject(embedding, key = "umap_")
+
+embedding_pca <- py$adata$obsm["X_pca"] # pca based on eR
+rownames(embedding_pca) <- py$adata$obs_names$to_list()
+colnames(embedding_pca) <- paste0(rep("PC_",50),c(1:50))
+eR.seurat[["pca"]] <- CreateDimReducObject(embedding_pca, key = "PC_")
+
+eR.seurat <- SetIdent(eR.seurat, value = 'leiden')
+```
+
+## show RNA and eRegulon umap together
+```{r}
+p1 <- DimPlot(bs1140.seurat) + NoLegend() + ggtitle('RNA')
+p2 <- DimPlot(eR.seurat, reduction = 'umap') + NoLegend() + ggtitle('eRegulon')
+p1 + p2
+p2
+```
+
+# build a new combined seurat object
+```{r}
+n.bs1140 <- bs1140.seurat
+newnames <- gsub('-BS1140', '', colnames(eR.seurat))
+eR.seurat <- RenameCells(eR.seurat, new.names = newnames)
+eRassay <- GetAssayData(eR.seurat, assay = 'RNA', slot = "data")
+# subsample common cells
+n.bs1140<- subset(n.bs1140, cells = colnames(eR.seurat))
+n.bs1140[['eR']] <- CreateAssayObject(data = eRassay)
+```
+
+```{r}
+# dimention reduction on eR
+DefaultAssay(n.bs1140) <- "eR"
+VariableFeatures(n.bs1140) <- rownames(n.bs1140[['eR']]) # use all eR features for dimensional reduction
+n.bs1140@reductions[['pca_eR']] <- eR.seurat@reductions[['pca']]
+n.bs1140@reductions[['umap_eR']] <- eR.seurat@reductions[['umap']]
+n.bs1140@reductions[['pca_rna']] <- n.bs1140@reductions[['pca']]
+n.bs1140@reductions[['pca']] <- NULL
+n.bs1140@reductions[['umap_rna']] <- n.bs1140@reductions[['umap']]
+n.bs1140@reductions[['umap']] <- NULL
+n.bs1140 <-  ScaleData(n.bs1140) %>%RunPCA(reduction.name = 'pca')
+
+n.bs1140 <- RunUMAP(n.bs1140, reduction.name = 'umap', dims = 1:50, reudction = 'pca', return.model = TRUE)
+DimPlot(n.bs1140, reduction = 'umap', label = TRUE)
+```
+
+## add the eR cluster cell type info
+```{r}
+tmp <- read.csv('/Users/jinhuixin/Master/thesis/GRN/BS1140/cluster_overlap/eRegulon_celltype.csv', row.names = 1)
+rownames(tmp) <- gsub('-BS1140','',rownames(tmp))
+reorder_tmp <- tmp[rownames(n.bs1140@meta.data),]
+n.bs1140@meta.data[['celltype_eR']] <- reorder_tmp
+rm(tmp, reorder_tmp)
+```
+
+## add ATAC cell type info to see the difference in 0 and 2 in wnn
+```{r}
+n.bs1140@meta.data[['celltype_atac']] <- eR.seurat@meta.data[rownames(n.bs1140@meta.data),'ACC_celltype']
+```
+
+
+# FindTransferAnchor on BS1140 5'RNA-only data
+label bs1140 5'scRNA dataset via mapquery to the integrated bs1140 multiomic object
+
+```{r}
+bs1140.5rna <- readRDS('/Users/jinhuixin/Master/thesis/5primeRNA_data/bs1140_5primeRNAonly.rds') 
+```
+
+## compute transfer anchor
+```{r}
+transfer.anchors2 <- FindTransferAnchors(reference = n.bs1140, 
+                                        query = bs1140.5rna, 
+                                        features = VariableFeatures(n.bs1140, assay = 'SCT'),
+                                        reference.assay = 'SCT',
+                                        query.assay = 'SCT',
+                                        normalization.method = 'SCT',
+                                        reduction = 'cca')
+
+# predict rna cell type
+celltype.predictions2_rna <- TransferData(anchorset = transfer.anchors2,
+                                     refdata = n.bs1140$celltype_rna_sct_assay,
+                                     weight.reduction = bs1140.5rna[['umap']], 
+                                     dims = 1:2)
+colnames(celltype.predictions2_rna)[1] <- 'predicted.id.rna' 
+bs1140.5rna <- AddMetaData(bs1140.5rna, metadata = celltype.predictions2_rna, col.name = colnames(celltype.predictions2_rna))
+
+# predict eR cell type
+celltype.predictions2_eR <- TransferData(anchorset = transfer.anchors2,
+                                     refdata = n.bs1140$celltype_eR,
+                                     weight.reduction = bs1140.5rna[['umap']], 
+                                     dims = 1:2)
+colnames(celltype.predictions2_eR)[1] <- 'predicted.id.eR'
+bs1140.5rna <- AddMetaData(bs1140.5rna, metadata = celltype.predictions2_eR)
+
+# predict atac cell type 
+celltype.predictions2_atac <- TransferData(anchorset = transfer.anchors2,
+                                     refdata = n.bs1140$celltype_atac,
+                                     weight.reduction = bs1140.5rna[['umap']], 
+                                     dims = 1:2)
+colnames(celltype.predictions2_atac)[1] <- 'predicted.id.atac'
+bs1140.5rna <- AddMetaData(bs1140.5rna, metadata = celltype.predictions2_atac)
+```
+
+## UMAP projection to eR umap
+### compute the model from scanpy eR cluster
+```{r}
+# try use seurat umap to get a model
+eR.forumap <- eR.seurat
+DefaultAssay(eR.forumap) <- 'RNA'
+VariableFeatures(eR.forumap) <- rownames(eR.forumap)
+eR.forumap <- RunUMAP(eR.forumap,
+                      return.model = TRUE, 
+                      umap.method = 'umap-learn',
+                      n.neighbors = 15,
+                      min.dist = 0.1,
+                      n.components = 2,
+                      metric = 'euclidean',
+                      features = VariableFeatures(eR.forumap),
+                      seed.use = 555) 
+```
+
+```{r}
+# replace old eR umap
+n.bs1140@reductions[['umap_eR']] <- eR.forumap@reductions[['umap']]
+n.bs1140@reductions[['pca_eR']] <- eR.forumap@reductions[['pca']]
+
+bs1140.5rna <- MapQuery(anchorset = transfer.anchors2, 
+                        reference = n.bs1140, 
+                        query = bs1140.5rna,
+                        reference.reduction = 'umap_eR',
+                        reduction.model = 'umap_eR')
+
+my_col_pal2 <- c("M-GZMK+"="#8DD3C7", "Ex-ENTPD1+"="#FFFFB3", "M-IL7R+"="#BEBADA", "GNLY+NKG7+"="#FB8072", "M-CD69+"="#80B1D3", "Naive-SESN3+"="#FDB462", "IKZF2+PITPNC1+"="#B3DE69", "Prol-STMN1+TOP2A+"="#FCCDE5", "GNLY+IKZF2+"="#D9D9D9", "CMSS1+FILIP1L+" = "#BC80BD")
+
+p1 <- DimPlot(n.bs1140, reduction = 'umap_eR', group.by = 'celltype_rna_sct_assay', label = TRUE, label.size = 3, repel = TRUE, cols = my_col_pal2) + 
+  ggtitle('Reference RNA SCT annotations')
+p2 <- DimPlot(bs1140.5rna, reduction = 'ref.umap', group.by = 'predicted.id.rna', label = TRUE, label.size = 3, repel = TRUE, cols = my_col_pal2, pt.size = 0.7) + 
+  NoLegend() + 
+  ggtitle('Query transferred RNA SCT labels')
+p3 <- DimPlot(n.bs1140, reduction = 'umap_eR', group.by = 'celltype_eR', label = TRUE, label.size = 3, repel = TRUE, cols = my_color) + 
+  ggtitle('Reference eR annotations')
+p4 <- DimPlot(bs1140.5rna, reduction = 'ref.umap', group.by = 'predicted.id.eR', label = TRUE, label.size = 3, repel = TRUE, cols = my_color, pt.size = 0.7) + 
+  NoLegend() + 
+  ggtitle('Query transferred eR labels')
+p5 <- DimPlot(n.bs1140, reduction = 'umap_eR', group.by = 'celltype_atac', label = TRUE, label.size = 3, repel = TRUE, cols = my_color) + 
+  ggtitle('Reference eR annotations')
+p6 <- DimPlot(bs1140.5rna, reduction = 'ref.umap', group.by = 'predicted.id.atac', label = TRUE, label.size = 3, repel = TRUE, cols = my_color, pt.size = 0.7) + 
+  NoLegend() + 
+  ggtitle('Query transferred eR labels')
+p <- (p1 / p2) | (p3 / p4) | (p5 / p6)
+pdf('./MapQuery_bs1140_5p_rna_on_eR_umap.pdf', width = 24, height = 8)
+p
+dev.off()
+```
+
+# save mapquery results of 5'rna
+```{r}
+saveRDS(bs1140.5rna, file = './bs1140_5prime_rna_mapquery_seurat_obj.rds')
+```
+
+# save bs1140 reference object
+```{r}
+saveRDS(n.bs1140, file = './bs1140_rna_eR_integrated_seurat_obj.rds')
+```
+
+
