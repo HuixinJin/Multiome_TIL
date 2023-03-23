@@ -23,4 +23,16 @@ The scanpy analysis of scRNA is the prerequisite of SCENIC+ analysis and the cod
 - Cluster and annotation based on marker genes
 
 ## scATAC Part
-The scATAC analysis using ArchR package in R is in: 
+The scATAC analysis using ArchR package in R is in: [scATAC/scATAC_analysis_ArchR.Rmd](https://github.com/HuixinJin/Multiome_TIL/edit/main/scATAC/scATAC_analysis_ArchR.Rmd)
+- Build ArchR project and filter doublets
+- Choose parameters for _addIterativeLSI()_ function based on Silhouette score
+- Cluster based on iterative LSI result and choose resolution using Silhouette score
+- Add UMAP and extract marker features for each cluster
+- Add imupated gene scores and visualize on UMAP
+- Call peaks in dataset using _addReproduciblePeakSet()_ and get marker peaks for each cluster
+- Add motif matrix and identify enriched motifs in each cluster
+- Visualize interested motifs on UMAP
+- Add co-accessiblity between peaks and _plotBrowserTrack()_ shows the connection
+
+## Multiomic Integration
+The SCENIC+ analysis integrated scRNA and scATAC data in Python is in: []
