@@ -35,4 +35,18 @@ The scATAC analysis using ArchR package in R is in: [scATAC/scATAC_analysis_Arch
 - Add co-accessiblity between peaks and _plotBrowserTrack()_ shows the connection
 
 ## Multiomic Integration
-The SCENIC+ analysis integrated scRNA and scATAC data in Python is in: []
+The SCENIC+ analysis integrated scRNA and scATAC data in Python is in: [multiomic/SCENIC+_pipeline.ipynb](https://github.com/HuixinJin/Multiome_TIL/edit/main/multiomic/SCENIC+_pipeline.ipynb)
+After scRNA preprocessing, scATAC also need to be processed via pycisTopic package.
+- Generate pseudobulk ATAC-seq profiles
+- Call peaks and generate a consensus peak set
+- Quality control and filter on ATAC data
+- Build cisTopic object
+- Topic modelling using the optimal topics number 
+- Provide another dimention reduction view of scATAC based on topic model
+- Calculate differential accessible regions (DARs) and infer candidate enhancer regions
+- Use pycistarget to do the motif enrichment analysis
+- Create summarized SCENIC+ object for further analysis
+- Dot-heatmap to show the correlation between TF expression and either target region accessibility or target gene expression
+  - Calculate the region specificity scores of TFs
+  - Get top eRegulons in each cluster
+  - Use modified dot-heatmap plot function to visualize
