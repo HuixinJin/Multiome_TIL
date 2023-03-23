@@ -35,6 +35,7 @@ The scATAC analysis using ArchR package in R is in: [scATAC/scATAC_analysis_Arch
 - Add co-accessiblity between peaks and _plotBrowserTrack()_ shows the connection
 
 ## Multiomic Integration
+### SCENIC+
 The SCENIC+ analysis integrated scRNA and scATAC data in Python is in: [multiomic/SCENIC+_pipeline.ipynb](https://github.com/HuixinJin/Multiome_TIL/edit/main/multiomic/SCENIC+_pipeline.ipynb)
 After scRNA preprocessing, scATAC also need to be processed via pycisTopic package.
 - Generate pseudobulk ATAC-seq profiles
@@ -42,7 +43,7 @@ After scRNA preprocessing, scATAC also need to be processed via pycisTopic packa
 - Quality control and filter on ATAC data
 - Build cisTopic object
 - Topic modelling using the optimal topics number 
-- Provide another dimention reduction view of scATAC based on topic model
+- Provide another dimension reduction view of scATAC based on topic model
 - Calculate differential accessible regions (DARs) and infer candidate enhancer regions
 - Use pycistarget to do the motif enrichment analysis
 - Create summarized SCENIC+ object for further analysis
@@ -50,3 +51,35 @@ After scRNA preprocessing, scATAC also need to be processed via pycisTopic packa
   - Calculate the region specificity scores of TFs
   - Get top eRegulons in each cluster
   - Use modified dot-heatmap plot function to visualize
+### ArchR
+ArchR provides a way to integrate scRNA expression matrix with scATAC data and further multiomic analysis.
+The ArchR integration process in R is in: [multiomic/ArchR1-integrate-scRNA-into-object.Rmd](https://github.com/HuixinJin/Multiome_TIL/edit/main/multiomic/ArchR1-integrate-scRNA-into-object.Rmd)
+- Import ArchR project and scRNA matrix
+- Add scRNA data into ArchR object via _addGeneExpressionMatrix()_
+- Iterative LSI dimension reduction on scATAC and scRNA and the two combined
+- Add UMAP based on different dimension reduction results
+- Cluster with optimal parameters
+- Additional further analysis:
+  - Build peak to gene linkages
+  - Identify deviant TF motifs and the correlation between motifs and TF expression
+  - Identify positive TF regulators
+
+## Trajectory analysis
+### ArchR
+The trajectory built on the low dimension space can be colored either by predicted gene score or gene expression value. The code in R is in: [multiomic/ArchR2-trajectory-analysis-and-subclone.Rmd](https://github.com/HuixinJin/Multiome_TIL/edit/main/multiomic/ArchR2-trajectory-analysis-and-subclone.Rmd)
+- Import another interested UMAP as a new choice for low dimension space
+- Set the interested trajectory 
+- Add the trajectory via _addTrajectory()_ function
+- Visualize the trajectory on chosen UMAP and colored by either Gene score predicted from region accessiblity or the integrated scRNA expression value
+- Visualize the changes also in heatmap style by _plotTrajectoryHeatmap()_
+- Extract cells in specific clones to generate the gene fluctuation along trajectory
+### SCENIC+
+The trajectory analysis by SCENIC+ in Python is in: [multiomic/eR_influence_along_trajectory.ipynb](https://github.com/HuixinJin/Multiome_TIL/edit/main/multiomic/eR_influence_along_trajectory.ipynb)
+- Create a anndata object combining the eRegulon AUC values in SCENIC+ object and scRNA data
+- Add eRegulon-based UMAP and eRegulon-based cell type annotation to the anndata object
+- Use PAGA to infer the trajectory
+- Calculate pseudotime using eRegulon enrichment matrix
+  - Some comparison with pseudotime computed based on multi-sample scRNA data
+- Set paths of interest and calculate path matrices
+- Generate eRegulon enrichment level along trajectories and plot on UMAP and curve plot
+
